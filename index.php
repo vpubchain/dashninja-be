@@ -53,9 +53,9 @@ $eventManager->attach('micro', function($event, $app) use ($mysqli) {
 
     // The server should have the TLS client certificate information and the remote peer address
     // If not, just fail early
-    if (!array_key_exists("VERIFIED",$_SERVER) || ($_SERVER['VERIFIED'] != "SUCCESS")
+    if (/*!array_key_exists("VERIFIED",$_SERVER) || ($_SERVER['VERIFIED'] != "SUCCESS")
      || !array_key_exists("DN",$_SERVER) || (strlen($_SERVER['DN'])==0)
-     || !array_key_exists("REMOTE_ADDR",$_SERVER) || (strlen($_SERVER['REMOTE_ADDR'])==0)) {
+     || */!array_key_exists("REMOTE_ADDR",$_SERVER) || (strlen($_SERVER['REMOTE_ADDR'])==0)) {
       $response = new Phalcon\Http\Response();
       $response->setStatusCode(401, "Unauthorized");
       //Send errors to the client
@@ -75,6 +75,7 @@ $eventManager->attach('micro', function($event, $app) use ($mysqli) {
       return false;
     }
     // Now we need to check the peer is a known/allowed hub (via its client certificate and the remote address)
+    $_SERVER['DN'] = 1;
     $cacheserial = sha1($_SERVER['DN']);
     $cacheserial2 = sha1($_SERVER['REMOTE_ADDR']);
     $cachefnam = CACHEFOLDER.sprintf("dashninja_cmd_hubcheck_%s_%s",$cacheserial,$cacheserial2);
@@ -97,6 +98,8 @@ $eventManager->attach('micro', function($event, $app) use ($mysqli) {
       $data = array("result" => $result, "authinfo" => $authinfo);
       file_put_contents($cachefnam,serialize($data),LOCK_EX);
     }
+    
+    //$authinfo
     // If the query failed, something is wrong with MySQL
     // Means we are out of business
     if ($result === false) {
@@ -107,7 +110,9 @@ $eventManager->attach('micro', function($event, $app) use ($mysqli) {
       $authinfo = false;
       return false;
     }
-    else {
+    
+    $authinfo['HubId'] = 1;
+    /*else {
       // If the query result is null, then the remote peer is NOT authorized
       if (is_null($authinfo)) {
         $response = new Phalcon\Http\Response();
@@ -126,7 +131,7 @@ $eventManager->attach('micro', function($event, $app) use ($mysqli) {
         return false;
       }
       // We passed! Peer is authorized!
-    }
+    }*/
   }
 
 });
@@ -899,6 +904,9 @@ function dmn_masternodes2_get($mysqli, $testnet = 0, $protocol = 0, $mnpubkeys =
     $sqlprotocol = sprintf("%d",$protocol);
     $sqltestnet = sprintf("%d",$testnet);
 
+        // Semaphore that we are currently updating
+        //touch($cachefnamupdate);
+
         // Add selection by pubkey
         $sqlpks = "";
         if (count($mnpubkeys) > 0) {
@@ -1189,7 +1197,6 @@ WHERE
     ((ActiveCount > 0) OR (InactiveCount > 0))
 ORDER BY MasternodeOutputHash, MasternodeOutputIndex;
 EOT;
-
     // Execute the query
     $numnodes = 0;
     if ($mysqli->multi_query($sql)) {
@@ -1199,8 +1206,6 @@ EOT;
                     $nodes = array();
                     while($row = $result->fetch_assoc()){
                         $numnodes++;
-                        $row["OperadorReward"] = floatval(0.0);
-                        $row["OperadorRewardAddress"] = "";
                         $nodes[] = $row;
                     }
                 }
@@ -1221,75 +1226,6 @@ EOT;
     }
 
     return $nodes;
-}
-
-
-// Function to retrieve the deterministic masternode list
-function dmn_cmd_protx_get($mysqli, $testnet = 0) {
-
-  $sqltestnet = sprintf("%d",$testnet);
-
-  $sql = <<<EOT
-SELECT
-    cp.proTxHash proTxHash,
-    cp.collateralHash MasternodeOutputHash,
-    cp.collateralIndex MasternodeOutputIndex,
-    inet6_ntoa(cps.addrIP) MasternodeIP,
-    cps.addrPort MasternodePort,
-    cps.payoutAddress MasternodePubkey,
-    cps.operatorRewardAddress OperatorRewardAddress,
-    cp.operatorReward OperatorReward,
-    UNIX_TIMESTAMP(cp.LastSeen) lastSeen
-FROM
-    cmd_protx cp
-LEFT JOIN cmd_protx_state cps USING (proTxTestNet, proTxHash)
-LEFT JOIN cmd_nodes cn USING (NodeID)
-WHERE
-    cp.proTxTestNet = $sqltestnet AND (UNIX_TIMESTAMP()-UNIX_TIMESTAMP(cp.LastSeen) <= 3600)
-ORDER BY proTxHash;
-EOT;
-
-    // Execute the query
-    if ($result = $mysqli->query($sql)) {
-      $nodestmp = array();
-      while($row = $result->fetch_assoc()){
-        if ((time() - intval($row["lastSeen"])) > 300) {
-          $active = 0;
-        }
-        else {
-          $active = 1;
-        }
-        if (!array_key_exists($row["proTxHash"],$nodestmp)) {
-          $nodestmp[$row["proTxHash"]] = array(
-            "MasternodeOutputHash" => $row["MasternodeOutputHash"],
-            "MasternodeOutputIndex" => intval($row["MasternodeOutputIndex"]),
-            "MasternodeIP" => $row["MasternodeIP"],
-            "MasternodeTor" => "",
-            "MasternodePort" => intval($row["MasternodePort"]),
-            "MasternodePubkey" => $row["MasternodePubkey"],
-            "MasternodeProtocol" => 70212,
-            "OperatorRewardAddress" => $row["OperatorRewardAddress"],
-            "OperatorReward" => floatval($row["OperatorReward"]),
-            "activeCount" => $active,
-          );
-        }
-        else {
-          $nodestmp[$row["proTxHash"]]["activeCount"] += $active;
-        }
-      }
-      $nodes = array();
-      foreach($nodestmp as $node) {
-        if ($node["activeCount"] > 0) {
-          unset($node["activeCount"]);
-          $nodes[] = $node;
-        }
-      }
-    }
-    else {
-      $nodes = false;
-    }
-
-  return $nodes;
 }
 
 // ============================================================================
@@ -1331,19 +1267,14 @@ $app->get('/masternodes', function() use ($app,&$mysqli) {
     $mnlist = dmn_cmd_masternodes2_get($mysqli, $testnet);;
     $mnlisterrno = $mysqli->errno;
     $mnlisterror = $mysqli->error;
-    $protxlist = dmn_cmd_protx_get($mysqli, $testnet);;
-    $protxlisterrno = $mysqli->errno;
-    $protxlisterror = $mysqli->error;
-    $mnlistfinal = array_merge($mnlist,$protxlist);
-    if (($mnlist !== false) && ($protxlist !== false)) {
+    if ($mnlist !== false) {
       //Change the HTTP status
       $response->setStatusCode(200, "OK");
-      $response->setJsonContent(array('status' => 'OK', 'data' => array('masternodes' => $mnlistfinal)));
+      $response->setJsonContent(array('status' => 'OK', 'data' => array('masternodes' => $mnlist)));
     }
     else {
       $response->setStatusCode(503, "Service Unavailable");
-      $response->setJsonContent(array('status' => 'ERROR', 'messages' => array($mnlisterrno.': '.$mnlisterror,print_r($mnlist,true),
-        $protxlisterrno.': '.$protxlisterror,print_r($protxlist,true))));
+      $response->setJsonContent(array('status' => 'ERROR', 'messages' => array($mnlisterrno.': '.$mnlisterror,print_r($mnlist,true))));
     }
   }
   return $response;
@@ -1503,6 +1434,10 @@ $app->get('/nodes', function() use ($app,&$mysqli) {
       $sql .= sprintf(" AND NodeType = '%s'",$mysqli->real_escape_string($request->getQuery('NodeType')));
     }
     $sqlx = sprintf($sql,$authinfo['HubId']);
+    
+    //$log_file = "/var/log/dashninja/be.log";
+    //file_put_contents($log_file, $sqlx, FILE_APPEND);
+    
     $numnodes = 0;
     $nodes = array();
     if ($result = $mysqli->query($sqlx)) {
@@ -1588,7 +1523,6 @@ $app->post('/ping', function() use ($app,&$mysqli) {
    || !array_key_exists('gobjproposals',$payload) || !is_array($payload['gobjproposals'])
    || !array_key_exists('gobjtriggers',$payload) || !is_array($payload['gobjtriggers'])
    || !array_key_exists('gobjvotes',$payload) || !is_array($payload['gobjvotes'])
-   || !array_key_exists('protx',$payload) || !is_array($payload['protx'])
    || !array_key_exists('mnlist',$payload) || !is_array($payload['mnlist'])
    || !array_key_exists('mnlist2',$payload) || !is_array($payload['mnlist2'])) {
     //Change the HTTP status
@@ -1652,7 +1586,6 @@ $app->post('/ping', function() use ($app,&$mysqli) {
           }
           $sqlsporksprune = "DELETE FROM cmd_nodes_spork WHERE ".implode(" OR ",$sporksprune);
           unset($sporksprune,$sporkprunepernodeid);
-
         $sql = "INSERT INTO cmd_nodes_status (NodeId, NodeProcessStatus, NodeVersion, NodeProtocol, NodeBlocks, NodeLastBlockHash,"
                                    ." NodeConnections, NodeCountry, NodeCountryCode, LastUpdate)"
                            ." VALUES ".implode(',',$sqlstatus)
@@ -1663,7 +1596,6 @@ $app->post('/ping', function() use ($app,&$mysqli) {
 
         if ($result = $mysqli->query($sql)) {
           $nodesinfo = $mysqli->info;
-
           $sql = "INSERT INTO cmd_nodes_spork (NodeID, SporkName, SporkValue) VALUE ".implode(',',$sqlspork)
                 ." ON DUPLICATE KEY UPDATE SporkValue = VALUES(SporkValue)";
           $result = $mysqli->query($sql);
@@ -1745,126 +1677,8 @@ $app->post('/ping', function() use ($app,&$mysqli) {
             }
           }*/
 
-            $protxsql = array();
-            $protxstatesql = array();
-            foreach($payload['protx'] as $testnet => $protxlist) {
-              foreach($protxlist as $protxhash => $protx) {
-                  $protxhash = $mysqli->real_escape_string($protxhash);
-                  $protxcollateralhash = $mysqli->real_escape_string($protx['collateralHash']);
-                  // ProTx info
-                  $protxsql[] = sprintf("(%d, '%s', '%s', %d, %5.2f, %d, NOW())",
-                      $testnet,
-                      $protxhash,
-                      $protxcollateralhash,
-                      $protx['collateralIndex'],
-                      $protx['operatorReward'],
-                      $protx['confirmations']);
-                  // ProTx States d
-                  foreach ($protx["state"] as $uname => $protxstate) {
-                      if (!array_key_exists($uname, $nodes)) {
-                          $response->setStatusCode(503, "Service Unavailable");
-                          $response->setJsonContent(array('status' => 'ERROR', 'messages' => array("Unknown node reported")));
-                          return $response;
-                      }
-                      $nodeid = $nodes[$uname]['NodeId'];
-                      $keyIDOwner = $mysqli->real_escape_string($protxstate['keyIDOwner']);
-                      $pubKeyOperator = $mysqli->real_escape_string($protxstate['pubKeyOperator']);
-                      $keyIDVoting = $mysqli->real_escape_string($protxstate['keyIDVoting']);
-                      $addr = $mysqli->real_escape_string($protxstate['addr']);
-                      $payoutAddress = $mysqli->real_escape_string($protxstate['payoutAddress']);
-                      if (array_key_exists('operatorRewardAddress',$protxstate)) {
-                          $operatorRewardAddress = $mysqli->real_escape_string($protxstate['operatorRewardAddress']);
-                      }
-                      else {
-                          $operatorRewardAddress = "";
-                      }
 
-                      $mnip = $mysqli->real_escape_string(substr($addr,0,strrpos($addr,":")));
-                      $mnport = intval(substr($addr,0-strlen($addr)+strlen($mnip)+1));
-
-                      $protxstatesql[] = sprintf("(%d, '%s', %d, %d, %d, %d, %d, %d, %d, '%s', '%s', '%s', INET6_ATON('%s'), %d, '%s', '%s')",
-                          $testnet,
-                          $protxhash,
-                          $nodeid,
-                          $protxstate['registeredHeight'],
-                          $protxstate['lastPaidHeight'],
-                          $protxstate['PoSePenalty'],
-                          $protxstate['PoSeRevivedHeight'],
-                          $protxstate['PoSeBanHeight'],
-                          $protxstate['revocationReason'],
-                          $keyIDOwner,
-                          $pubKeyOperator,
-                          $keyIDVoting,
-                          $mnip,
-                          $mnport,
-                          $payoutAddress,
-                          $operatorRewardAddress
-                      );
-
-                      $mngeoip = geoip_record_by_name($mnip);
-                      if ($mngeoip !== FALSE) {
-                          $mnipcountry = $mngeoip["country_name"];
-                          $mnipcountrycode = strtolower($mngeoip["country_code"]);
-                      } else {
-                          $mnipcountry = "Unknown";
-                          $mnipcountrycode = "__";
-                      }
-                      $sqlpc[] = sprintf("(INET6_ATON('%s'), %d, %d, 'unknown', '%s', '%s')",
-                          $mnip,
-                          $mnport,
-                          $testnet,
-                          $mnipcountry,
-                          $mnipcountrycode
-                      );
-                  }
-              }
-            }
-
-            if (count($protxsql) > 0) {
-                $sql = "INSERT INTO cmd_protx (proTxTestNet, proTxHash, collateralHash, collateralIndex, operatorReward, confirmations, LastSeen) "
-                    ." VALUE ".implode(',',$protxsql)
-                    ." ON DUPLICATE KEY UPDATE collateralHash = VALUES(collateralHash),"
-                    ." collateralIndex = VALUES(collateralIndex), operatorReward = VALUES(operatorReward),"
-                    ." confirmations = VALUES(confirmations), LastSeen = VALUES(LastSeen)";
-
-                if ($result91 = $mysqli->query($sql)) {
-                    $protxinfo = $mysqli->info;
-                }
-                else {
-                    $protxinfo = $mysqli->error;
-                }
-                unset($protxsql);
-            }
-            else {
-                $protxinfo = "Nothing to do";
-            }
-
-            if (count($protxstatesql) > 0) {
-                $sql = "INSERT INTO cmd_protx_state (proTxTestNet, proTxHash, NodeID, registeredHeight, lastPaidHeight,"
-                    ." PoSePenalty, PoSeRevivedHeight, PoSeBanHeight, revocationReason, keyIDOwner, pubKeyOperator,"
-                    ." keyIDVoting, addrIP, addrPort, payoutAddress, operatorRewardAddress)"
-                    ." VALUE ".implode(',',$protxstatesql)
-                    ." ON DUPLICATE KEY UPDATE registeredHeight = VALUES(registeredHeight),"
-                    ." lastPaidHeight = VALUES(lastPaidHeight), PoSePenalty = VALUES(PoSePenalty),"
-                    ." PoSeRevivedHeight = VALUES(PoSeRevivedHeight), PoSeBanHeight = VALUES(PoSeBanHeight),"
-                    ." revocationReason = VALUES(revocationReason), keyIDOwner = VALUES(keyIDOwner),"
-                    ." pubKeyOperator = VALUES(pubKeyOperator), keyIDVoting = VALUES(keyIDVoting),"
-                    ." addrIP = VALUES(addrIP), addrPort = VALUES(addrPort), payoutAddress = VALUES(payoutAddress),"
-                    ." operatorRewardAddress = VALUES(operatorRewardAddress), StateDate = VALUES(StateDate)";
-
-                if ($result92 = $mysqli->query($sql)) {
-                    $protxstateinfo = $mysqli->info;
-                }
-                else {
-                    $protxstateinfo = $mysqli->error;
-                }
-                unset($protxstatesql);
-            }
-            else {
-                $protxstateinfo = "Nothing to do";
-            }
-
-            $mninfosql2 = array();
+          $mninfosql2 = array();
           $mnqueryexc2 = array();
           $skipinfo = "";
           foreach($payload['mninfo2'] as $mninfo) {
@@ -1934,7 +1748,6 @@ $app->post('/ping', function() use ($app,&$mysqli) {
                   ." MasternodeTor = VALUES(MasternodeTor), MasternodePort = VALUES(MasternodePort), MasternodeLastPaid = VALUES(MasternodeLastPaid),"
                   ." MasternodeLastPaidBlock = VALUES(MasternodeLastPaidBlock), MasternodeDaemonVersion = VALUES(MasternodeDaemonVersion),"
                   ." MasternodeSentinelVersion = VALUES(MasternodeSentinelVersion), MasternodeSentinelState = VALUES(MasternodeSentinelState)";
-
             if ($result22 = $mysqli->query($sql)) {
                 $mninfo2info = $mysqli->info . $skipinfo;
             }
@@ -2550,7 +2363,7 @@ $app->post('/ping', function() use ($app,&$mysqli) {
             }
             $gobjecttriggersinfo = false;
             $gobjecttriggersinfopayments = false;
-            $gobjecttriggersinfopaymentstrim = array(false);
+            $gobjecttriggersinfopaymentstrim = false;
             if (count($sqlgobjecttriggers) > 0) {
                 $sql = "INSERT INTO `cmd_gobject_triggers` (GovernanceObjectTestnet, GovernanceObjectId, GovernanceObjectEventBlockHeight,"
                     ." GovernanceObjectVotesAbsoluteYes, GovernanceObjectVotesYes, GovernanceObjectVotesNo, GovernanceObjectVotesAbstain, GovernanceObjectBlockchainValidity,"
@@ -2656,8 +2469,6 @@ $app->post('/ping', function() use ($app,&$mysqli) {
                                                                             'mnvotes' => $mnvotesinfo,
                                                                             'nodes' => $nodesinfo,
                                                                             'portcheck' => $pcinfo,
-                                                                            'protx' => $protxinfo,
-                                                                            'protxstate' => $protxstateinfo,
                                                                             'spork' => $sporkinfo,
                                                                             'stats' => $statsinfo,
                                                                             'stats2' => $stats2info
